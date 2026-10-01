@@ -13,8 +13,11 @@ import torch
 if importlib.util.find_spec('flash_attn') is None:
     interface = types.ModuleType('flash_attn.flash_attn_interface')
     interface.flash_attn_varlen_func = None
-    with patch.dict(sys.modules, {'flash_attn.flash_attn_interface': interface}):
+    sys.modules['flash_attn.flash_attn_interface'] = interface
+    try:
         trainer = importlib.import_module('qwenvl.train.trainer')
+    finally:
+        del sys.modules['flash_attn.flash_attn_interface']
 else:
     trainer = importlib.import_module('qwenvl.train.trainer')
 
