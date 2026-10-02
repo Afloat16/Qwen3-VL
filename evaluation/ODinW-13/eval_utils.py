@@ -2,6 +2,7 @@
 ODinW evaluation utilities.
 """
 import os
+import copy
 import json
 import tempfile
 import numpy as np
@@ -101,13 +102,19 @@ def compute_metrics(results: list, outfile_prefix: str = None, _coco_api: COCO =
         iou_type = metric
         if metric not in result_files:
             raise KeyError(f'{metric} is not in results')
-        try:
-            with open(result_files[metric], 'r') as f:
-                predictions = json.load(f)
+        with open(result_files[metric], 'r') as f:
+            predictions = json.load(f)
+        if predictions:
             coco_dt = _coco_api.loadRes(predictions)
-        except IndexError:
-            print('The testing results of the whole dataset is empty.')
-            break
+        else:
+            # COCO.loadRes indexes the first detection and cannot load [].
+            # An empty detection dataset must still be evaluated against all
+            # ground truths: AP is zero where GT exists and undefined (-1)
+            # for area/category slices that contain no GT.
+            coco_dt = COCO()
+            coco_dt.dataset = copy.deepcopy(_coco_api.dataset)
+            coco_dt.dataset['annotations'] = []
+            coco_dt.createIndex()
         
         coco_eval = COCOeval(_coco_api, coco_dt, iou_type)
         
