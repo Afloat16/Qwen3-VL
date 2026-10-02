@@ -32,7 +32,7 @@ def _numeric_expression(text):
 
     def evaluate(node):
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            return float(node.value)
+            return node.value
         if isinstance(node, ast.BinOp) and type(node.op) in binary_ops:
             return binary_ops[type(node.op)](evaluate(node.left), evaluate(node.right))
         if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:
@@ -429,4 +429,3 @@ def MATH_V_acc(result_file):
 def eval_single_sample(args):
     """Evaluate a single sample."""
     return MATH_V_auxeval(args)
-

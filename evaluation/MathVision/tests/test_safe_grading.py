@@ -58,7 +58,12 @@ class SafeGradingTest(unittest.TestCase):
         self.assertTrue(eval_utils.is_equal(r"\sqrt{2}", "1.4142135623730951"))
         self.assertFalse(eval_utils.is_equal(r"\sqrt{2}", "1.5"))
 
+    def test_large_integer_arithmetic_keeps_exact_precision(self):
+        self.assertFalse(eval_utils.is_equal("9007199254740993", "9007199254740992"))
+        self.assertTrue(eval_utils.is_equal("9007199254740993 % 2", "1"))
+        self.assertTrue(eval_utils.is_equal("9007199254740993 // 3", "3002399751580331"))
+        self.assertFalse(eval_utils.is_equal("9007199254740993 // 3", "3002399751580330"))
+
 
 if __name__ == "__main__":
     unittest.main()
-
