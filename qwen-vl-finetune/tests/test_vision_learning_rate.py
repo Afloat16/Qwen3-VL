@@ -1,12 +1,14 @@
 """Independent vision learning rates must survive optimizer construction."""
 import importlib
+import itertools
 import sys
+import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import torch
-from transformers import Trainer
+from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration, Trainer, TrainingArguments
 
 
 # Import the complete native trainer without requiring the CUDA FlashAttention
@@ -99,6 +101,101 @@ class VisionLearningRateTest(unittest.TestCase):
         self.assert_rates(0.002, None, frozen=True)
 
 
+def make_native_model():
+    config = Qwen3VLConfig(
+        text_config=dict(
+            vocab_size=64, hidden_size=32, intermediate_size=48,
+            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
+            head_dim=8, rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
+        ),
+        vision_config=dict(
+            depth=1, hidden_size=16, intermediate_size=32, num_heads=2,
+            patch_size=2, temporal_patch_size=1, spatial_merge_size=2,
+            out_hidden_size=32, num_position_embeddings=16, deepstack_visual_indexes=[0],
+        ),
+        tie_word_embeddings=False,
+    )
+    config._attn_implementation = "eager"
+    return Qwen3VLForConditionalGeneration(config)
+
+
+def make_native_trainer(model, output_dir, projector_lr, vision_lr, weight_decay=0.1):
+    args = TrainingArguments(
+        output_dir=output_dir, report_to="none", use_cpu=True, optim="sgd",
+        learning_rate=0.05, weight_decay=weight_decay,
+    )
+    args.mm_projector_lr = projector_lr
+    args.vision_tower_lr = vision_lr
+    return Trainer(model=model, args=args)
+
+
+class NativeComponentLearningRateTest(unittest.TestCase):
+    def test_native_qwen_rates_and_deepstack_mergers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for projector_lr, vision_lr in itertools.product((None, 0.0, 0.02), (None, 0.0, 0.005)):
+                with self.subTest(projector_lr=projector_lr, vision_lr=vision_lr):
+                    model = make_native_model()
+                    owner = make_native_trainer(model, directory, projector_lr, vision_lr)
+                    optimizer = trainer.create_optimizer(owner)
+                    groups = {id(p): g for g in optimizer.param_groups for p in g["params"]}
+                    parameters = [p for group in optimizer.param_groups for p in group["params"]]
+                    self.assertEqual(len(groups), len(parameters))
+                    decay = {name for name in owner.get_decay_parameter_names(model) if "bias" not in name}
+                    self.assertTrue(any("deepstack_merger" in name for name, _ in model.named_parameters()))
+                    for name, parameter in model.named_parameters():
+                        rate = 0.05
+                        if "merger" in name and projector_lr:
+                            rate = projector_lr
+                        elif "visual" in name and "merger" not in name and vision_lr:
+                            rate = vision_lr
+                        self.assertEqual(groups[id(parameter)]["lr"], rate, name)
+                        self.assertEqual(groups[id(parameter)]["weight_decay"], 0.1 if name in decay else 0.0, name)
+
+    def test_native_sgd_step_follows_requested_vision_rate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for projector_lr in (None, 0.0, 0.02):
+                with self.subTest(projector_lr=projector_lr):
+                    model = make_native_model()
+                    owner = make_native_trainer(model, directory, projector_lr, 0.005, weight_decay=0.0)
+                    optimizer = trainer.create_optimizer(owner)
+                    parameter = model.visual.blocks[0].attn.qkv.weight
+                    before = parameter.detach().clone()
+                    parameter.grad = torch.ones_like(parameter)
+                    optimizer.step()
+                    torch.testing.assert_close(parameter, before - 0.005)
+
+    def test_native_group_partition_for_all_trainability_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for flags in itertools.product((False, True), repeat=3):
+                for projector_lr, vision_lr in ((None, 0.005), (0.02, None), (0.02, 0.005)):
+                    with self.subTest(flags=flags, projector_lr=projector_lr, vision_lr=vision_lr):
+                        model = make_native_model()
+                        vision, projector, language = flags
+                        for name, parameter in model.named_parameters():
+                            if "merger" in name:
+                                parameter.requires_grad_(projector)
+                            elif "visual" in name:
+                                parameter.requires_grad_(vision)
+                            else:
+                                parameter.requires_grad_(language)
+                        owner = make_native_trainer(model, directory, projector_lr, vision_lr)
+                        optimizer = trainer.create_optimizer(owner)
+                        parameters = [p for group in optimizer.param_groups for p in group["params"]]
+                        self.assertEqual(len({id(p) for p in parameters}), len(parameters))
+                        self.assertEqual(
+                            {id(p) for p in parameters},
+                            {id(p) for p in model.parameters() if p.requires_grad},
+                        )
+
+    def test_native_optimizer_reuse_preserves_existing_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner = make_native_trainer(make_native_model(), directory, None, 0.005)
+            first = trainer.create_optimizer(owner)
+            owner.args.vision_tower_lr = 0.03
+            self.assertIs(trainer.create_optimizer(owner), first)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
