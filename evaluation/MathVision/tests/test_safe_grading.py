@@ -1,5 +1,4 @@
 """Model answers and choices are data, not executable Python."""
-import importlib.util
 from pathlib import Path
 import sys
 import tempfile
@@ -19,7 +18,9 @@ class SafeGradingTest(unittest.TestCase):
     def test_model_response_cannot_execute_code(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "executed"
-            answer = f"(__import__('pathlib').Path({str(marker)!r}).write_text('bad'), 1)[1]"
+            # is_equal lowercases responses before grading, so this sentinel
+            # deliberately uses only lowercase callable names.
+            answer = f"(__import__('builtins').open({str(marker)!r}, 'w').write('bad'), 1)[1]"
             self.assertFalse(eval_utils.is_equal(answer, "1"))
             self.assertFalse(marker.exists())
 
